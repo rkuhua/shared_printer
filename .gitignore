@@ -1,0 +1,16 @@
+# Ignore user configuration (private IP/Username)
+printer_config.txt
+
+# Ignore temporary files
+*.tmp
+*.log
+*.bak
+
+# Usually we ignore build artifacts, but if you want to share the EXE, keep this line commented out:
+# *.exe
+# *.pdb
+
+# OS generated files
+Thumbs.db
+Desktop.ini
+.DS_Store
