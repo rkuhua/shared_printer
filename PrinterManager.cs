@@ -206,7 +206,8 @@ namespace PrinterManager
             btnFixNetwork = new Button() { Text = "修复网络发现与共享服务", Location = new Point(20, 70), Size = new Size(250, 40) };
             btnFixNetwork.Click += (s, e) => RunRepair("network");
 
-            btnFixGuestPolicy = new Button() { Text = "修复客户端无法连接 (Guest策略)", Location = new Point(20, 120), Size = new Size(250, 40) };
+            // Updated button text
+            btnFixGuestPolicy = new Button() { Text = "一键修复客户端连接策略 (含Win10/11/24H2)", Location = new Point(20, 120), Size = new Size(400, 40) }; // Widened
             btnFixGuestPolicy.Click += (s, e) => RunRepair("guest_policy");
 
             btnDisableFirewall = new Button() { Text = "一键关闭本机防火墙 (解决连接受阻)", Location = new Point(20, 170), Size = new Size(250, 40), ForeColor = Color.Red };
@@ -532,8 +533,26 @@ namespace PrinterManager
                 }
                 else if (type == "guest_policy")
                 {
-                    Registry.SetValue(@"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\LanmanWorkstation\Parameters", "AllowInsecureGuestAuth", 1, RegistryValueKind.DWord);
-                    Log("已启用不安全的 Guest 登录 (AllowInsecureGuestAuth)");
+                    string lmParams = @"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\LanmanWorkstation\Parameters";
+                    string polParams = @"HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\LanmanWorkstation";
+                    
+                    // 1. AllowInsecureGuestAuth (Win10)
+                    Registry.SetValue(lmParams, "AllowInsecureGuestAuth", 1, RegistryValueKind.DWord);
+                    // Also try Policy key
+                    try { Registry.SetValue(polParams, "AllowInsecureGuestAuth", 1, RegistryValueKind.DWord); } catch { }
+                    Log("已启用 AllowInsecureGuestAuth");
+
+                    // 2. Win11 24H2 Fixes
+                    // Disable signing (always) -> RequireSecuritySignature = 0
+                    Registry.SetValue(lmParams, "RequireSecuritySignature", 0, RegistryValueKind.DWord);
+                    
+                    // Disable signing (if server allows) -> EnableSecuritySignature = 0
+                    Registry.SetValue(lmParams, "EnableSecuritySignature", 0, RegistryValueKind.DWord);
+
+                    // Enable PlainTextPassword (send to 3rd party)
+                    Registry.SetValue(lmParams, "EnablePlainTextPassword", 1, RegistryValueKind.DWord);
+
+                    Log("已应用 Win11/24H2 兼容性策略 (SMB签名/明文密码)");
                 }
                 else if (type == "disable_firewall")
                 {
