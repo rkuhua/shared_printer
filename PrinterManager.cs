@@ -41,10 +41,11 @@ namespace PrinterManager
         private TextBox txtShareName;
 
         // Tab 3: Repair
-        private Button btnFixSpooler;
-        private Button btnFixNetwork;
-        private Button btnFixGuestPolicy;
-        private Button btnDisableFirewall;
+        private Button btnFixSpooler_Host;
+        private Button btnFixNetwork_Host;
+        private Button btnDisableFirewall_Host;
+        private Button btnFixPolicy_Client;
+        private Button btnFixSpooler_Client;
         private TextBox txtLog;
 
         private ToolStripStatusLabel statusLabel;
@@ -72,7 +73,7 @@ namespace PrinterManager
         private void InitializeComponent()
         {
             this.Text = "全能打印机共享管理工具 (Win7/10/11兼容版) - 作者：R";
-            this.Size = new Size(650, 650);
+            this.Size = new Size(650, 700); // Increased height for better layout
             this.StartPosition = FormStartPosition.CenterScreen;
             this.FormBorderStyle = FormBorderStyle.FixedSingle;
             this.MaximizeBox = false;
@@ -131,7 +132,6 @@ namespace PrinterManager
             
             lstRemoteShares = new ListBox() { Location = new Point(15, 25), Size = new Size(400, 140) };
             
-            // Auto Set Default Checkbox
             chkAutoSetDefault = new CheckBox() { Text = "安装后自动设为默认", Location = new Point(430, 25), AutoSize = true, Checked = true };
             
             btnInstallPrinter = new Button() { Text = "一键安装选中打印机", Location = new Point(430, 50), Size = new Size(150, 40) };
@@ -200,23 +200,46 @@ namespace PrinterManager
 
         private void CreateRepairTab(TabPage tab)
         {
-            btnFixSpooler = new Button() { Text = "修复打印服务 (Spooler)", Location = new Point(20, 20), Size = new Size(250, 40) };
-            btnFixSpooler.Click += (s, e) => RunRepair("spooler");
+            // === Host Repair Group ===
+            GroupBox grpHost = new GroupBox();
+            grpHost.Text = "主机端修复 (本机作为共享主机)";
+            grpHost.Location = new Point(10, 10);
+            grpHost.Size = new Size(600, 150);
 
-            btnFixNetwork = new Button() { Text = "修复网络发现与共享服务", Location = new Point(20, 70), Size = new Size(250, 40) };
-            btnFixNetwork.Click += (s, e) => RunRepair("network");
+            btnFixSpooler_Host = new Button() { Text = "重启打印服务 (Spooler)", Location = new Point(15, 30), Size = new Size(250, 40) };
+            btnFixSpooler_Host.Click += (s, e) => RunRepair("spooler");
 
-            // Updated button text
-            btnFixGuestPolicy = new Button() { Text = "一键修复客户端连接策略 (含Win10/11/24H2)", Location = new Point(20, 120), Size = new Size(400, 40) }; // Widened
-            btnFixGuestPolicy.Click += (s, e) => RunRepair("guest_policy");
+            btnFixNetwork_Host = new Button() { Text = "开启网络发现与共享服务", Location = new Point(280, 30), Size = new Size(250, 40) };
+            btnFixNetwork_Host.Click += (s, e) => RunRepair("network");
 
-            btnDisableFirewall = new Button() { Text = "一键关闭本机防火墙 (解决连接受阻)", Location = new Point(20, 170), Size = new Size(250, 40), ForeColor = Color.Red };
-            btnDisableFirewall.Click += (s, e) => RunRepair("disable_firewall");
+            btnDisableFirewall_Host = new Button() { Text = "一键关闭本机防火墙", Location = new Point(15, 85), Size = new Size(250, 40), ForeColor = Color.Red };
+            btnDisableFirewall_Host.Click += (s, e) => RunRepair("disable_firewall");
 
-            Label lblLog = new Label() { Text = "操作日志:", Location = new Point(20, 220), AutoSize = true };
-            txtLog = new TextBox() { Location = new Point(20, 240), Size = new Size(580, 250), Multiline = true, ScrollBars = ScrollBars.Vertical, ReadOnly = true };
+            Label lblHostDesc = new Label() { Text = "如果其他电脑无法发现或连接此电脑，请尝试上述修复。", Location = new Point(280, 95), AutoSize = true, ForeColor = Color.Gray };
+            grpHost.Controls.AddRange(new Control[] { btnFixSpooler_Host, btnFixNetwork_Host, btnDisableFirewall_Host, lblHostDesc });
 
-            tab.Controls.AddRange(new Control[] { btnFixSpooler, btnFixNetwork, btnFixGuestPolicy, btnDisableFirewall, lblLog, txtLog });
+
+            // === Client Repair Group ===
+            GroupBox grpClient = new GroupBox();
+            grpClient.Text = "客户端修复 (本机去连接别人)";
+            grpClient.Location = new Point(10, 170);
+            grpClient.Size = new Size(600, 150);
+
+            btnFixPolicy_Client = new Button() { Text = "一键修复连接策略 (含Win10/11/24H2)", Location = new Point(15, 30), Size = new Size(400, 40) };
+            btnFixPolicy_Client.Click += (s, e) => RunRepair("guest_policy");
+
+            btnFixSpooler_Client = new Button() { Text = "重启打印服务 (Spooler)", Location = new Point(15, 85), Size = new Size(250, 40) };
+            btnFixSpooler_Client.Click += (s, e) => RunRepair("spooler");
+
+            Label lblClientDesc = new Label() { Text = "解决“无法访问”、“扩展错误”、“组织策略阻止”等问题。", Location = new Point(15, 130), AutoSize = true, ForeColor = Color.Gray };
+            grpClient.Controls.AddRange(new Control[] { btnFixPolicy_Client, btnFixSpooler_Client, lblClientDesc });
+
+
+            // Log Area
+            Label lblLog = new Label() { Text = "操作日志:", Location = new Point(10, 330), AutoSize = true };
+            txtLog = new TextBox() { Location = new Point(10, 350), Size = new Size(600, 200), Multiline = true, ScrollBars = ScrollBars.Vertical, ReadOnly = true };
+
+            tab.Controls.AddRange(new Control[] { grpHost, grpClient, lblLog, txtLog });
         }
 
         private void LoadConfig()
@@ -538,20 +561,13 @@ namespace PrinterManager
                     
                     // 1. AllowInsecureGuestAuth (Win10)
                     Registry.SetValue(lmParams, "AllowInsecureGuestAuth", 1, RegistryValueKind.DWord);
-                    // Also try Policy key
                     try { Registry.SetValue(polParams, "AllowInsecureGuestAuth", 1, RegistryValueKind.DWord); } catch { }
                     Log("已启用 AllowInsecureGuestAuth");
 
                     // 2. Win11 24H2 Fixes
-                    // Disable signing (always) -> RequireSecuritySignature = 0
                     Registry.SetValue(lmParams, "RequireSecuritySignature", 0, RegistryValueKind.DWord);
-                    
-                    // Disable signing (if server allows) -> EnableSecuritySignature = 0
                     Registry.SetValue(lmParams, "EnableSecuritySignature", 0, RegistryValueKind.DWord);
-
-                    // Enable PlainTextPassword (send to 3rd party)
                     Registry.SetValue(lmParams, "EnablePlainTextPassword", 1, RegistryValueKind.DWord);
-
                     Log("已应用 Win11/24H2 兼容性策略 (SMB签名/明文密码)");
                 }
                 else if (type == "disable_firewall")
