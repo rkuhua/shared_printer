@@ -215,8 +215,11 @@ namespace PrinterManager
             btnDisableFirewall_Host = new Button() { Text = "一键关闭本机防火墙", Location = new Point(15, 85), Size = new Size(250, 40), ForeColor = Color.Red };
             btnDisableFirewall_Host.Click += (s, e) => RunRepair("disable_firewall");
 
-            Label lblHostDesc = new Label() { Text = "如果其他电脑无法发现或连接此电脑，请尝试上述修复。", Location = new Point(280, 95), AutoSize = true, ForeColor = Color.Gray };
-            grpHost.Controls.AddRange(new Control[] { btnFixSpooler_Host, btnFixNetwork_Host, btnDisableFirewall_Host, lblHostDesc });
+            Button btnUnlockUser_Host = new Button() { Text = "解除用户锁定 (解锁账号)", Location = new Point(280, 85), Size = new Size(250, 40) };
+            btnUnlockUser_Host.Click += (s, e) => RunRepair("unlock_user");
+
+            Label lblHostDesc = new Label() { Text = "如果其他电脑无法发现或连接此电脑，请尝试上述修复。", Location = new Point(15, 130), AutoSize = true, ForeColor = Color.Gray };
+            grpHost.Controls.AddRange(new Control[] { btnFixSpooler_Host, btnFixNetwork_Host, btnDisableFirewall_Host, btnUnlockUser_Host, lblHostDesc });
 
 
             // === Client Repair Group ===
@@ -528,9 +531,35 @@ namespace PrinterManager
                 Registry.SetValue(@"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Lsa", "RestrictAnonymous", 0);
                 Registry.SetValue(@"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Lsa", "LimitBlankPasswordUse", 0);
                 Registry.SetValue(@"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Lsa", "EveryoneIncludesAnonymous", 1);
-                MessageBox.Show("配置完成！\n\n注意：如果仍无法连接，请重启电脑。");
+                
+                // Fix User Rights (Clear Deny Network Logon)
+                FixUserRights();
+
+                MessageBox.Show("配置完成！\n已尝试移除 '拒绝从网络访问' 策略。\n\n注意：如果仍无法连接，请重启电脑。");
             }
             catch (Exception ex) { MessageBox.Show("配置失败 (需要管理员权限): " + ex.Message); }
+        }
+
+        private void FixUserRights()
+        {
+            try
+            {
+                string cfgPath = Path.Combine(Path.GetTempPath(), "sec_fix.inf");
+                string dbPath = Path.Combine(Path.GetTempPath(), "sec_fix.sdb");
+                
+                // Create a minimal INF to clear SeDenyNetworkLogonRight
+                // This removes everyone (including Guest) from the Deny list
+                string content = "[Unicode]\r\nUnicode=yes\r\n[Version]\r\nsignature=\"$CHICAGO$\"\r\nRevision=1\r\n[Privilege Rights]\r\nSeDenyNetworkLogonRight =\r\n";
+                File.WriteAllText(cfgPath, content, Encoding.Unicode);
+                
+                RunCommand("secedit", string.Format("/configure /db \"{0}\" /cfg \"{1}\" /areas USER_RIGHTS", dbPath, cfgPath));
+                Log("已清空 '拒绝从网络访问这台计算机' 策略 (允许Guest)");
+                
+                // Clean up
+                if (File.Exists(cfgPath)) File.Delete(cfgPath);
+                if (File.Exists(dbPath)) File.Delete(dbPath);
+            }
+            catch (Exception ex) { Log("组策略修复失败: " + ex.Message); }
         }
 
         private void RunRepair(string type)
@@ -568,7 +597,17 @@ namespace PrinterManager
                     Registry.SetValue(lmParams, "RequireSecuritySignature", 0, RegistryValueKind.DWord);
                     Registry.SetValue(lmParams, "EnableSecuritySignature", 0, RegistryValueKind.DWord);
                     Registry.SetValue(lmParams, "EnablePlainTextPassword", 1, RegistryValueKind.DWord);
-                    Log("已应用 Win11/24H2 兼容性策略 (SMB签名/明文密码)");
+                    
+                    // 3. User Suggested Fix: RestrictDriverInstallationToAdministrators (PrintNightmare)
+                    string printPolicy = @"HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows NT\Printers\PointAndPrint";
+                    try
+                    {
+                        Registry.SetValue(printPolicy, "RestrictDriverInstallationToAdministrators", 0, RegistryValueKind.DWord);
+                        Log("已应用 RestrictDriverInstallationToAdministrators = 0");
+                    }
+                    catch { Log("尝试设置 PrintNightmare 策略失败 (可能需要手动创建键值)"); }
+
+                    Log("已应用 Win11/24H2 兼容性策略 (SMB签名/明文密码/打印机驱动策略)");
                 }
                 else if (type == "disable_firewall")
                 {
@@ -578,9 +617,60 @@ namespace PrinterManager
                         Log("已尝试关闭本机防火墙 (所有配置文件)");
                     }
                 }
+                else if (type == "unlock_user")
+                {
+                    string targetUser = ShowInputBox("解除锁定", "请输入要解锁的用户名 (如 Guest, GUSER):", "GUSER");
+                    if (!string.IsNullOrEmpty(targetUser))
+                    {
+                        RunCommand("net", string.Format("user \"{0}\" /active:yes", targetUser));
+                        Log("已尝试解锁用户: " + targetUser);
+                        MessageBox.Show("已执行解锁命令。\n如果问题依旧，请检查密码策略或手动在 lusrmgr.msc 中解锁。");
+                    }
+                }
                 MessageBox.Show("操作已执行，请查看日志。");
             }
             catch (Exception ex) { Log("错误: " + ex.Message); MessageBox.Show("操作失败: " + ex.Message); }
+        }
+
+        private string ShowInputBox(string title, string promptText, string defaultValue)
+        {
+            Form form = new Form();
+            Label label = new Label();
+            TextBox textBox = new TextBox();
+            Button buttonOk = new Button();
+            Button buttonCancel = new Button();
+
+            form.Text = title;
+            label.Text = promptText;
+            textBox.Text = defaultValue;
+
+            buttonOk.Text = "确定";
+            buttonCancel.Text = "取消";
+            buttonOk.DialogResult = DialogResult.OK;
+            buttonCancel.DialogResult = DialogResult.Cancel;
+
+            label.SetBounds(9, 20, 372, 13);
+            textBox.SetBounds(12, 36, 372, 20);
+            buttonOk.SetBounds(228, 72, 75, 23);
+            buttonCancel.SetBounds(309, 72, 75, 23);
+
+            label.AutoSize = true;
+            textBox.Anchor = textBox.Anchor | AnchorStyles.Right;
+            buttonOk.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
+            buttonCancel.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
+
+            form.ClientSize = new Size(396, 107);
+            form.Controls.AddRange(new Control[] { label, textBox, buttonOk, buttonCancel });
+            form.ClientSize = new Size(Math.Max(300, label.Right + 10), form.ClientSize.Height);
+            form.FormBorderStyle = FormBorderStyle.FixedDialog;
+            form.StartPosition = FormStartPosition.CenterScreen;
+            form.MinimizeBox = false;
+            form.MaximizeBox = false;
+            form.AcceptButton = buttonOk;
+            form.CancelButton = buttonCancel;
+
+            DialogResult dialogResult = form.ShowDialog();
+            return dialogResult == DialogResult.OK ? textBox.Text : "";
         }
 
         [STAThread]
