@@ -577,10 +577,32 @@ namespace PrinterManager
                 {
                     RunCommand("net", "start LanmanServer");
                     RunCommand("net", "start LanmanWorkstation");
-                    RunCommand("net", "start fdPHost"); 
-                    RunCommand("net", "start FDResPub"); 
+                    RunCommand("net", "start fdPHost");
+                    RunCommand("net", "start FDResPub");
                     RunCommand("netsh", "advfirewall firewall set rule group=\"File and Printer Sharing\" new enable=Yes");
                     RunCommand("netsh", "advfirewall firewall set rule group=\"文件和打印机共享\" new enable=Yes");
+                    
+                    // Switch Network to Private (Category = 1)
+                    try
+                    {
+                        string profilesPath = @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\NetworkList\Profiles";
+                        using (RegistryKey key = Registry.LocalMachine.OpenSubKey(profilesPath, true))
+                        {
+                            if (key != null)
+                            {
+                                foreach (string subKeyName in key.GetSubKeyNames())
+                                {
+                                    using (RegistryKey subKey = key.OpenSubKey(subKeyName, true))
+                                    {
+                                        if (subKey != null) subKey.SetValue("Category", 1, RegistryValueKind.DWord);
+                                    }
+                                }
+                                Log("已尝试将所有网络配置设为【专用网络】");
+                            }
+                        }
+                    }
+                    catch { Log("切换网络配置文件失败 (可能权限不足)"); }
+                    
                     Log("网络发现与共享服务已启动，防火墙规则已允许");
                 }
                 else if (type == "guest_policy")
@@ -598,14 +620,21 @@ namespace PrinterManager
                     Registry.SetValue(lmParams, "EnableSecuritySignature", 0, RegistryValueKind.DWord);
                     Registry.SetValue(lmParams, "EnablePlainTextPassword", 1, RegistryValueKind.DWord);
                     
-                    // 3. User Suggested Fix: RestrictDriverInstallationToAdministrators (PrintNightmare)
+                    // 3. User Suggested Fixes (PrintNightmare & RPC)
                     string printPolicy = @"HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows NT\Printers\PointAndPrint";
                     try
                     {
+                        // 0x11b Fixes
                         Registry.SetValue(printPolicy, "RestrictDriverInstallationToAdministrators", 0, RegistryValueKind.DWord);
-                        Log("已应用 RestrictDriverInstallationToAdministrators = 0");
+                        Registry.SetValue(printPolicy, "NoWarningNoElevationOnInstall", 0, RegistryValueKind.DWord);
+                        Registry.SetValue(printPolicy, "UpdatePromptSettings", 0, RegistryValueKind.DWord);
+                        
+                        // RpcAuthnLevelPrivacyEnabled (Client & Server side fix for 0x11b/0x709)
+                        Registry.SetValue(@"HKEY_LOCAL_MACHINE\System\CurrentControlSet\Control\Print", "RpcAuthnLevelPrivacyEnabled", 0, RegistryValueKind.DWord);
+                        
+                        Log("已应用 0x11b/0x709 修复策略 (RestrictDriver + RPC + Elevation)");
                     }
-                    catch { Log("尝试设置 PrintNightmare 策略失败 (可能需要手动创建键值)"); }
+                    catch { Log("尝试设置打印机安全策略失败 (需要管理员权限)"); }
 
                     Log("已应用 Win11/24H2 兼容性策略 (SMB签名/明文密码/打印机驱动策略)");
                 }
