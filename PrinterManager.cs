@@ -9,6 +9,7 @@ using System.Windows.Forms;
 using Microsoft.Win32;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
+using System.Net.Sockets;
 
 namespace PrinterManager
 {
@@ -23,6 +24,7 @@ namespace PrinterManager
         private TextBox txtPassword;
         private CheckBox chkSaveConfig;
         private Button btnConnect;
+        private Button btnDiagnoseConnection;
         private ListBox lstRemoteShares;
         private Button btnInstallPrinter;
         private CheckBox chkAutoSetDefault;
@@ -122,8 +124,11 @@ namespace PrinterManager
             
             btnConnect = new Button() { Text = "连接并列出资源", Location = new Point(300, 55), Width = 250, Height = 30 };
             btnConnect.Click += BtnConnect_Click;
+            btnConnect.Width = 120;
+            btnDiagnoseConnection = new Button() { Text = "连接诊断", Location = new Point(430, 55), Width = 120, Height = 30 };
+            btnDiagnoseConnection.Click += BtnDiagnoseConnection_Click;
 
-            grpConnection.Controls.AddRange(new Control[] { lblIP, txtServerIP, lblUser, txtUsername, lblPass, txtPassword, chkSaveConfig, btnConnect });
+            grpConnection.Controls.AddRange(new Control[] { lblIP, txtServerIP, lblUser, txtUsername, lblPass, txtPassword, chkSaveConfig, btnConnect, btnDiagnoseConnection });
 
             GroupBox grpRemote = new GroupBox();
             grpRemote.Text = "远程共享资源 (打印机/文件夹)";
@@ -292,6 +297,22 @@ namespace PrinterManager
 
         private void RunCommand(string command, string args, Action<string> outputCallback = null)
         {
+            CommandResult result = RunCommandDetailed(command, args);
+            if (outputCallback != null)
+            {
+                outputCallback(result.StdOut);
+            }
+        }
+
+        private class CommandResult
+        {
+            public int ExitCode;
+            public string StdOut;
+            public string StdErr;
+        }
+
+        private CommandResult RunCommandDetailed(string command, string args)
+        {
             ProcessStartInfo psi = new ProcessStartInfo();
             psi.FileName = command;
             psi.Arguments = args;
@@ -299,17 +320,339 @@ namespace PrinterManager
             psi.RedirectStandardError = true;
             psi.UseShellExecute = false;
             psi.CreateNoWindow = true;
-            psi.StandardOutputEncoding = Encoding.GetEncoding("gb2312"); 
+            psi.StandardOutputEncoding = Encoding.GetEncoding("gb2312");
+            psi.StandardErrorEncoding = Encoding.GetEncoding("gb2312");
 
-            using (Process proc = Process.Start(psi))
+            try
             {
-                if (outputCallback != null)
+                using (Process proc = Process.Start(psi))
                 {
                     string output = proc.StandardOutput.ReadToEnd();
-                    outputCallback(output);
+                    string error = proc.StandardError.ReadToEnd();
+                    proc.WaitForExit();
+
+                    return new CommandResult
+                    {
+                        ExitCode = proc.ExitCode,
+                        StdOut = output ?? string.Empty,
+                        StdErr = error ?? string.Empty
+                    };
                 }
-                proc.WaitForExit();
             }
+            catch (Exception ex)
+            {
+                return new CommandResult
+                {
+                    ExitCode = -1,
+                    StdOut = string.Empty,
+                    StdErr = ex.Message
+                };
+            }
+        }
+
+        private string EscapeArg(string value)
+        {
+            if (value == null) return string.Empty;
+            return value.Replace("\"", "\\\"");
+        }
+
+        private List<string> BuildUserCandidates(string ip, string user)
+        {
+            List<string> userCandidates = new List<string>();
+            if (string.IsNullOrEmpty(user))
+            {
+                return userCandidates;
+            }
+
+            if (user.Contains("\\") || user.Contains("@"))
+            {
+                userCandidates.Add(user);
+            }
+            else
+            {
+                userCandidates.Add(user);
+                userCandidates.Add(".\\" + user);
+                userCandidates.Add(ip + "\\" + user);
+            }
+
+            return userCandidates;
+        }
+
+        private bool IsRunningAsAdmin()
+        {
+            try
+            {
+                WindowsIdentity identity = WindowsIdentity.GetCurrent();
+                WindowsPrincipal principal = new WindowsPrincipal(identity);
+                return principal.IsInRole(WindowsBuiltInRole.Administrator);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private bool TestTcpPort(string host, int port, int timeoutMs, out string error)
+        {
+            error = string.Empty;
+            TcpClient client = new TcpClient();
+            try
+            {
+                IAsyncResult ar = client.BeginConnect(host, port, null, null);
+                bool ok = ar.AsyncWaitHandle.WaitOne(timeoutMs);
+                if (!ok)
+                {
+                    error = "timeout";
+                    return false;
+                }
+
+                client.EndConnect(ar);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                return false;
+            }
+            finally
+            {
+                try { client.Close(); } catch { }
+            }
+        }
+
+        private string GetCombinedOutput(CommandResult result)
+        {
+            StringBuilder sb = new StringBuilder();
+            if (!string.IsNullOrEmpty(result.StdOut)) sb.AppendLine(result.StdOut.Trim());
+            if (!string.IsNullOrEmpty(result.StdErr)) sb.AppendLine(result.StdErr.Trim());
+            return sb.ToString().Trim();
+        }
+
+        private void AppendCommandResult(StringBuilder sb, string title, CommandResult result, int maxLines)
+        {
+            sb.AppendLine(string.Format("{0}: ExitCode={1}", title, result.ExitCode));
+            string combined = GetCombinedOutput(result);
+            if (string.IsNullOrEmpty(combined))
+            {
+                sb.AppendLine("  (无输出)");
+                return;
+            }
+
+            string[] lines = combined.Split(new char[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+            int count = 0;
+            foreach (string raw in lines)
+            {
+                string line = raw.Trim();
+                if (line.Length == 0) continue;
+                sb.AppendLine("  " + line);
+                count++;
+                if (count >= maxLines)
+                {
+                    if (lines.Length > maxLines) sb.AppendLine("  ...");
+                    break;
+                }
+            }
+        }
+
+        private bool ContainsAny(string text, params string[] patterns)
+        {
+            if (string.IsNullOrEmpty(text)) return false;
+            foreach (string pattern in patterns)
+            {
+                if (text.IndexOf(pattern, StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private bool TryConnectServer(string ip, string user, string pass, out string usedUser, out string errorSummary)
+        {
+            usedUser = string.Empty;
+            List<string> errors = new List<string>();
+
+            if (string.IsNullOrEmpty(user))
+            {
+                CommandResult anonymousResult = RunCommandDetailed("net", string.Format("use \\\\{0} /persistent:no", ip));
+                if (anonymousResult.ExitCode == 0)
+                {
+                    errorSummary = string.Empty;
+                    return true;
+                }
+
+                errors.Add(string.Format("anonymous (code {0}): {1}", anonymousResult.ExitCode, anonymousResult.StdErr.Trim()));
+                errorSummary = string.Join("\r\n", errors.ToArray());
+                return false;
+            }
+
+            HashSet<string> testedUsers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string candidateUser in BuildUserCandidates(ip, user))
+            {
+                if (!testedUsers.Add(candidateUser)) continue;
+
+                string args = string.Format(
+                    "use \\\\{0} /user:\"{1}\" \"{2}\" /persistent:no",
+                    ip,
+                    EscapeArg(candidateUser),
+                    EscapeArg(pass));
+
+                CommandResult result = RunCommandDetailed("net", args);
+                if (result.ExitCode == 0)
+                {
+                    usedUser = candidateUser;
+                    errorSummary = string.Empty;
+                    return true;
+                }
+
+                errors.Add(string.Format("{0} (code {1}): {2}", candidateUser, result.ExitCode, result.StdErr.Trim()));
+            }
+
+            errorSummary = string.Join("\r\n", errors.ToArray());
+            return false;
+        }
+
+        private void BtnDiagnoseConnection_Click(object sender, EventArgs e)
+        {
+            string ip = txtServerIP.Text.Trim();
+            string user = txtUsername.Text.Trim();
+            string pass = txtPassword.Text.Trim();
+
+            if (string.IsNullOrEmpty(ip))
+            {
+                MessageBox.Show("请输入服务器IP");
+                return;
+            }
+
+            SaveConfig();
+            UpdateStatus("正在执行连接诊断...");
+
+            StringBuilder report = new StringBuilder();
+            report.AppendLine("=== SMB 连接诊断 ===");
+            report.AppendLine("时间: " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
+            report.AppendLine("目标: " + ip);
+            report.AppendLine("用户名: " + (string.IsNullOrEmpty(user) ? "(未填写)" : user));
+            report.AppendLine("管理员权限: " + (IsRunningAsAdmin() ? "是" : "否"));
+            report.AppendLine();
+
+            string portError;
+            bool port445Open = TestTcpPort(ip, 445, 2500, out portError);
+            report.AppendLine("TCP 445: " + (port445Open ? "可达" : "不可达"));
+            if (!port445Open && !string.IsNullOrEmpty(portError))
+            {
+                report.AppendLine("  " + portError);
+            }
+            report.AppendLine();
+
+            RunCommandDetailed("net", string.Format("use \\\\{0} /delete /y", ip));
+
+            List<CommandResult> authResults = new List<CommandResult>();
+            List<string> authTitles = new List<string>();
+            bool authSuccess = false;
+            string usedUser = string.Empty;
+
+            if (string.IsNullOrEmpty(user))
+            {
+                CommandResult anonymousResult = RunCommandDetailed("net", string.Format("use \\\\{0} /persistent:no", ip));
+                authResults.Add(anonymousResult);
+                authTitles.Add("net use (anonymous)");
+                authSuccess = anonymousResult.ExitCode == 0;
+            }
+            else
+            {
+                HashSet<string> testedUsers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (string candidateUser in BuildUserCandidates(ip, user))
+                {
+                    if (!testedUsers.Add(candidateUser)) continue;
+
+                    string args = string.Format(
+                        "use \\\\{0} /user:\"{1}\" \"{2}\" /persistent:no",
+                        ip,
+                        EscapeArg(candidateUser),
+                        EscapeArg(pass));
+
+                    CommandResult result = RunCommandDetailed("net", args);
+                    authResults.Add(result);
+                    authTitles.Add("net use /user:" + candidateUser);
+
+                    if (result.ExitCode == 0)
+                    {
+                        authSuccess = true;
+                        usedUser = candidateUser;
+                        break;
+                    }
+                }
+            }
+
+            report.AppendLine("认证测试:");
+            for (int i = 0; i < authResults.Count; i++)
+            {
+                AppendCommandResult(report, authTitles[i], authResults[i], 4);
+            }
+            if (authSuccess && !string.IsNullOrEmpty(usedUser))
+            {
+                report.AppendLine("  成功账号格式: " + usedUser);
+            }
+            report.AppendLine();
+
+            CommandResult viewResult = RunCommandDetailed("net", string.Format("view \\\\{0}", ip));
+            report.AppendLine("共享枚举测试:");
+            AppendCommandResult(report, "net view \\\\" + ip, viewResult, 8);
+            report.AppendLine();
+
+            RunCommandDetailed("net", string.Format("use \\\\{0} /delete /y", ip));
+
+            List<string> hints = new List<string>();
+            string allText = report.ToString();
+
+            if (!port445Open)
+            {
+                hints.Add("445端口不通：先检查两台机器网络互通、防火墙规则和“文件和打印机共享”。");
+            }
+            if (!authSuccess)
+            {
+                hints.Add("认证未通过：Win11 建议用“主机名\\\\用户名”或“.\\\\用户名”，并确认密码正确。");
+            }
+            if (ContainsAny(allText, "1219"))
+            {
+                hints.Add("检测到 1219（凭据冲突）：先执行 net use * /delete /y，再重新连接。");
+            }
+            if (ContainsAny(allText, "system error 5", "系统错误 5", "access is denied", "拒绝访问"))
+            {
+                hints.Add("检测到错误 5（拒绝访问）：检查共享权限/NTFS 权限和本地安全策略。");
+            }
+            if (ContainsAny(allText, "system error 53", "系统错误 53"))
+            {
+                hints.Add("检测到错误 53（网络路径找不到）：检查IP、SMB服务、网络发现状态。");
+            }
+            if (ContainsAny(allText, "system error 67", "系统错误 67"))
+            {
+                hints.Add("检测到错误 67（网络名找不到）：共享名不存在或服务端共享发布异常。");
+            }
+            if (ContainsAny(allText, "system error 86", "系统错误 86", "1326"))
+            {
+                hints.Add("检测到凭据错误（86/1326）：请重新确认账号格式和密码。");
+            }
+            if (hints.Count == 0)
+            {
+                hints.Add("未识别到典型错误码；若仍失败，先运行“修复连接策略”并重启两端 Spooler 后再试。");
+            }
+
+            report.AppendLine("建议:");
+            for (int i = 0; i < hints.Count; i++)
+            {
+                report.AppendLine(string.Format("{0}. {1}", i + 1, hints[i]));
+            }
+
+            if (txtLog != null)
+            {
+                txtLog.AppendText("\r\n================ 连接诊断 ================\r\n");
+                txtLog.AppendText(report.ToString());
+                txtLog.AppendText("\r\n");
+            }
+
+            ShowTextDialog("连接诊断结果", report.ToString());
+            UpdateStatus("连接诊断完成");
         }
 
         private void BtnConnect_Click(object sender, EventArgs e)
@@ -329,21 +672,28 @@ namespace PrinterManager
 
             RunCommand("net", string.Format("use \\\\{0} /delete /y", ip));
 
-            string connectArgs = string.Format("use \\\\{0}", ip);
-            if (!string.IsNullOrEmpty(user))
+            string usedUser;
+            string connectError;
+            if (!TryConnectServer(ip, user, pass, out usedUser, out connectError))
             {
-                connectArgs += string.Format(" /user:{0} {1}", user, pass);
+                Log("SMB authentication failed, continue with share enumeration.");
+                if (!string.IsNullOrEmpty(connectError))
+                {
+                    Log(connectError);
+                }
+
+                MessageBox.Show(
+                    "连接服务器认证失败，程序将继续尝试读取共享列表。\r\n\r\n" +
+                    "如果是 Win11 到 Win11，建议用户名改成：主机名\\用户名 或 .\\用户名。\r\n" +
+                    "也可先执行“修复连接策略”后重试。",
+                    "认证失败",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
             }
-            
-            ProcessStartInfo psi = new ProcessStartInfo("net", connectArgs);
-            psi.CreateNoWindow = true;
-            psi.UseShellExecute = false;
-            try
+            else if (!string.IsNullOrEmpty(usedUser))
             {
-                Process p = Process.Start(psi);
-                p.WaitForExit();
+                Log("Connected with user: " + usedUser);
             }
-            catch { }
 
             UpdateStatus("正在获取资源列表 (API)...");
             lstRemoteShares.Items.Clear();
@@ -372,11 +722,26 @@ namespace PrinterManager
                     string[] lines = output.Split(new char[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
                     foreach (string line in lines)
                     {
-                        if (line.StartsWith("Share") || line.StartsWith("--") || line.StartsWith("") || line.Trim() == "") continue;
-                        string[] parts = line.Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                        string trimmed = line.Trim();
+                        if (string.IsNullOrEmpty(trimmed)) continue;
+                        if (trimmed.StartsWith("Share", StringComparison.OrdinalIgnoreCase) ||
+                            trimmed.StartsWith("共享名", StringComparison.OrdinalIgnoreCase) ||
+                            trimmed.StartsWith("---", StringComparison.OrdinalIgnoreCase) ||
+                            trimmed.StartsWith("The command completed", StringComparison.OrdinalIgnoreCase) ||
+                            trimmed.StartsWith("命令成功", StringComparison.OrdinalIgnoreCase))
+                        {
+                            continue;
+                        }
+
+                        string[] parts = trimmed.Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
                         if (parts.Length >= 2)
                         {
-                            lstRemoteShares.Items.Add(string.Format("{0} [Unknown]", parts[0]));
+                            string typeStr = "Folder";
+                            if (parts[1].IndexOf("print", StringComparison.OrdinalIgnoreCase) >= 0 || parts[1].Contains("打印"))
+                            {
+                                typeStr = "Print";
+                            }
+                            lstRemoteShares.Items.Add(string.Format("{0} [{1}]", parts[0], typeStr));
                         }
                     }
                 });
@@ -400,6 +765,14 @@ namespace PrinterManager
             }
 
             string selection = lstRemoteShares.SelectedItem.ToString();
+            if (selection.IndexOf("[Print]", StringComparison.OrdinalIgnoreCase) < 0)
+            {
+                if (MessageBox.Show("当前选中的共享看起来不是打印机，继续安装可能失败。是否继续？", "提示", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
+                {
+                    return;
+                }
+            }
+
             string shareName = selection.Split('[')[0].Trim();
             string serverIP = txtServerIP.Text.Trim();
             string fullPath = string.Format("\\\\{0}\\{1}", serverIP, shareName);
@@ -609,6 +982,7 @@ namespace PrinterManager
                 {
                     string lmParams = @"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\LanmanWorkstation\Parameters";
                     string polParams = @"HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\LanmanWorkstation";
+                    string serverParams = @"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters";
                     
                     // 1. AllowInsecureGuestAuth (Win10)
                     Registry.SetValue(lmParams, "AllowInsecureGuestAuth", 1, RegistryValueKind.DWord);
@@ -619,6 +993,9 @@ namespace PrinterManager
                     Registry.SetValue(lmParams, "RequireSecuritySignature", 0, RegistryValueKind.DWord);
                     Registry.SetValue(lmParams, "EnableSecuritySignature", 0, RegistryValueKind.DWord);
                     Registry.SetValue(lmParams, "EnablePlainTextPassword", 1, RegistryValueKind.DWord);
+                    Registry.SetValue(serverParams, "RequireSecuritySignature", 0, RegistryValueKind.DWord);
+                    Registry.SetValue(serverParams, "EnableSecuritySignature", 0, RegistryValueKind.DWord);
+                    Log("已应用 SMB 签名兼容策略（客户端+服务端）");
                     
                     // 3. User Suggested Fixes (PrintNightmare & RPC)
                     string printPolicy = @"HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows NT\Printers\PointAndPrint";
@@ -659,6 +1036,60 @@ namespace PrinterManager
                 MessageBox.Show("操作已执行，请查看日志。");
             }
             catch (Exception ex) { Log("错误: " + ex.Message); MessageBox.Show("操作失败: " + ex.Message); }
+        }
+
+        private void ShowTextDialog(string title, string content)
+        {
+            Form form = new Form();
+            TextBox txtContent = new TextBox();
+            FlowLayoutPanel panelButtons = new FlowLayoutPanel();
+            Button btnClose = new Button();
+            Button btnCopy = new Button();
+
+            form.Text = title;
+            form.Size = new Size(760, 560);
+            form.StartPosition = FormStartPosition.CenterScreen;
+            form.MinimizeBox = false;
+            form.MaximizeBox = false;
+
+            txtContent.Multiline = true;
+            txtContent.ScrollBars = ScrollBars.Both;
+            txtContent.ReadOnly = true;
+            txtContent.WordWrap = false;
+            txtContent.Dock = DockStyle.Fill;
+            txtContent.Font = new Font("Consolas", 9F);
+            txtContent.Text = content;
+
+            panelButtons.Dock = DockStyle.Bottom;
+            panelButtons.Height = 42;
+            panelButtons.FlowDirection = FlowDirection.RightToLeft;
+            panelButtons.Padding = new Padding(8);
+
+            btnClose.Text = "关闭";
+            btnClose.Width = 80;
+            btnClose.Click += (s, e) => form.Close();
+
+            btnCopy.Text = "复制结果";
+            btnCopy.Width = 90;
+            btnCopy.Click += (s, e) =>
+            {
+                try
+                {
+                    Clipboard.SetText(content ?? string.Empty);
+                    MessageBox.Show("诊断结果已复制到剪贴板。");
+                }
+                catch
+                {
+                    MessageBox.Show("复制失败。");
+                }
+            };
+
+            panelButtons.Controls.Add(btnClose);
+            panelButtons.Controls.Add(btnCopy);
+
+            form.Controls.Add(txtContent);
+            form.Controls.Add(panelButtons);
+            form.ShowDialog();
         }
 
         private string ShowInputBox(string title, string promptText, string defaultValue)
